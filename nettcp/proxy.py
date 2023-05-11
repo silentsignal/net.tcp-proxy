@@ -20,8 +20,11 @@ from .nmf import (Record, EndRecord, KnownEncodingRecord,
                   UpgradeRequestRecord, UpgradeResponseRecord, register_types)
 try:
     from .stream.gssapi import GSSAPIStream
-except (ImportError, OSError):
+except ImportError:
     warnings.warn('gssapi not installed, no negotiate protocol available')
+    GSSAPIStream = None
+except OSError:
+    warnings.warn('KFW is not installed for the Python GSSAPI module, install it from here: https://web.mit.edu/kerberos/kfw-4.1/kfw-4.1.html')
     GSSAPIStream = None
 
 try:
