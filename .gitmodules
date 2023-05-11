@@ -1,0 +1,3 @@
+[submodule "python-wcfbin"]
+	path = python-wcfbin
+	url = https://github.com/ernw/python-wcfbin
