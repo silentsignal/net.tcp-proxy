@@ -17,7 +17,10 @@ class GSSAPIStream:
                         gssapi.RequirementFlag.integrity)):
         self._inner = NegotiateStream(stream)
         if isinstance(server_name, str):
-            server_name = gssapi.Name(server_name, name_type=gssapi.NameType.hostbased_service)
+            nt = gssapi.NameType.kerberos_principal
+            if server_name.lower().startswith("host@"):
+                nt = gssapi.NameType.hostbased_service
+            server_name = gssapi.Name(server_name, name_type=nt)
         self.server_name = server_name
         self.flags = flags
         self.client_ctx = None
