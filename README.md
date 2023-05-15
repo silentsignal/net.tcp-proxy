@@ -1,6 +1,8 @@
 .Net netTcp WCF Binding Framwork
 ================================
 
+(This is a fork of [ERNW](https://github.com/ernw/net.tcp-proxy)'s [unmaintaned](https://github.com/ernw/net.tcp-proxy/pull/3#issuecomment-1546656400) repo with several bugfixes)
+
 This library implements the MC-NMF, MC-NMFTB and MS-NNS protocols for net.tcp
 webservices. It is able to parse and encode the different protocols and interact
 as an Man-in-the-Middle proxy for the negotiate authentication.
