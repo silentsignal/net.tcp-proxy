@@ -162,6 +162,8 @@ def as_enum(fmt, enum):
         return enum(value)
 
     def encode(enum):
+        if type(enum) is int:
+            return struct.pack(fmt, enum)
         return struct.pack(fmt, enum.value)
 
     internal.stream = stream
