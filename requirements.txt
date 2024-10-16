@@ -1,2 +1,5 @@
 helperlib
 gssapi
+setuptools
+requests
+jsonpickle

@@ -9,6 +9,12 @@ import binascii
 import threading
 import warnings
 import datetime
+import http.server
+import socketserver
+import requests 
+import jsonpickle
+import queue
+import time
 
 try:
     import SocketServer
@@ -39,6 +45,9 @@ log = logging.getLogger(__name__ + '.NETTCPProxy')
 
 trace_file = None
 
+args=None
+
+http_recv_q = queue.Queue()
 
 def print_data(msg, data):
     if log.isEnabledFor(logging.DEBUG):
@@ -81,6 +90,21 @@ class RecvThread(threading.Thread):
     def terminate(self):
         self.stop.set()
 
+# We have async responses, so we need a separate thread to handle responses   
+class HttpRecvThread(threading.Thread):
+    def __init__(self, s):
+        super(HttpRecvThread, self).__init__()
+        self.stream=s
+
+    def run(self):
+        log.debug('HTTP Handling data coming from the server')
+        global http_recv_q
+        while True:
+            obj = Record.parse_stream(self.stream)
+            log.debug('Got from server: %r', obj)
+            http_recv_q.put(obj)
+            data = obj.to_bytes()
+            #self.handler.log_data('s>c', data)
 
 class NETTCPProxy(SocketServer.BaseRequestHandler):
     negotiate = True
@@ -95,20 +119,24 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
         trace_file.flush()
 
     def handle(self):
+        global args
         log.info('New connection from %s:%d', *self.client_address)
+        s=None
+        t=None
         self.stop = threading.Event()
-        s = socket.create_connection((TARGET_HOST, TARGET_PORT))
-        self.stream = SocketStream(s)
         self.negotiated = False
-        t = RecvThread(self)
-        # t.daemon = True
-
+        if args.upstream_url is None:
+            s = socket.create_connection((TARGET_HOST, TARGET_PORT))
+            self.stream = SocketStream(s)
+            t = RecvThread(self)
+            # t.daemon = True
         try:
             self.mainloop(s, t)
         finally:
             t.terminate()
 
     def mainloop(self, s, t):
+        global args
         request_stream = SocketStream(self.request)
         while not self.stop.is_set():
             obj = Record.parse_stream(request_stream)
@@ -120,9 +148,20 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
             self.log_data('c>s', data)
 
             print_data('Got Data from client:', data)
-
-            self.stream.write(data)
-
+            if args.upstream_url is None:
+                self.stream.write(data)
+            else:
+                proxies={"http": args.upstream_proxy}
+                resp=requests.post(args.upstream_url, data=jsonpickle.dumps(obj), proxies=proxies)
+                resp_list=jsonpickle.loads(resp.text)
+                if len(resp_list)==0:
+                    print("No response, try further client messages")
+                for resp_obj in resp_list:
+                    print("Sending object")
+                    #resp_obj=jsonpickle.loads(resp.text)
+                    self.request.sendall(resp_obj.to_bytes())
+                continue
+                #self.stream.write(data)
             if obj.code == KnownEncodingRecord.code:
                 if self.negotiate:
                     upgr = UpgradeRequestRecord(UpgradeProtocolLength=21,
@@ -145,10 +184,29 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                     log.info('Client requested end')
                     self.stop.wait()
 
+class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
+    def _response(self, content):
+        self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s" % (len(content.encode("utf-8")), content.encode("utf-8")))
+        
+    def do_POST(self):
+        content_len = int(self.headers.get('Content-Length'))
+        post_body = self.rfile.read(content_len)
+        obj=jsonpickle.loads(post_body)
+        self.server.wcf_stream.write(obj.to_bytes())
+        #recv=self.server.wcf_stream.read(1024)
+        #rec=Record.parse(recv)
+        time.sleep(1.5) # uglyyyy
+        ret=[]
+        while not http_recv_q.empty():
+            ret.append(http_recv_q.get())
+        self._response(jsonpickle.dumps(ret))
+        
+        
+
 
 def main():
     import argparse
-    global trace_file, TARGET_HOST, TARGET_PORT
+    global trace_file, TARGET_HOST, TARGET_PORT, args
 
     HOST, PORT = "localhost", 8090
 
@@ -156,6 +214,9 @@ def main():
     parser.add_argument('-t', '--trace_file', type=argparse.FileType('w'))
     parser.add_argument('-b', '--bind', default=HOST)
     parser.add_argument('-p', '--port', type=int, default=PORT)
+    parser.add_argument('-U', '--upstream-url', type=str)
+    parser.add_argument('-P', '--upstream-proxy', type=str)
+    parser.add_argument('-H', '--http-listener', action="store_true")
     parser.add_argument('-n', '--negotiate', help='Negotiate with the given server name')
     parser.add_argument('TARGET_HOST')
     parser.add_argument('TARGET_PORT', type=int)
@@ -176,9 +237,21 @@ def main():
         log.error("GSSAPI not available, negotiation not possible. Try python2 with gssapi")
         sys.exit(1)
 
-    server = SocketServer.ThreadingTCPServer((args.bind, args.port), NETTCPProxy)
+    if not args.http_listener:
+        server = SocketServer.ThreadingTCPServer((args.bind, args.port), NETTCPProxy)
+        server.serve_forever()
+    else:
+        #Handler = MyHttpRequestHandler
+        with socketserver.TCPServer(("", args.port), MyHttpRequestHandler) as httpd:
+            print("Http Server Serving at port", args.port)
+            s = socket.create_connection((TARGET_HOST, TARGET_PORT))
+            wcf_stream = SocketStream(s)
+            httpd.wcf_stream = wcf_stream
+            http_recv_thread = HttpRecvThread(wcf_stream)
+            http_recv_thread.start()
+            httpd.serve_forever()
 
-    server.serve_forever()
+    
 
 if __name__ == "__main__":
     main()
