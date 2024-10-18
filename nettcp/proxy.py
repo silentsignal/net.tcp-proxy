@@ -15,6 +15,19 @@ import requests
 import jsonpickle
 import queue
 import time
+import json
+import base64
+import traceback
+import subprocess
+from io import BytesIO
+
+from nettcp.protocol2xml import parse
+from wcf.xml2records import XMLParser
+from wcf.records import dump_records,print_records
+
+from nbfx import Nbfx
+
+from kaitaistruct import KaitaiStream
 
 try:
     import SocketServer
@@ -24,6 +37,8 @@ except ImportError:
 from .stream.socket import SocketStream
 from .nmf import (Record, EndRecord, KnownEncodingRecord,
                   UpgradeRequestRecord, UpgradeResponseRecord, register_types)
+                  
+from wcf.records import Record as WcfRecord
 try:
     from .stream.gssapi import GSSAPIStream
 except ImportError:
@@ -38,6 +53,7 @@ try:
 except ImportError:
     warnings.warn('python-helperlib not installed, no hexdump available (https://github.com/bluec0re/python-helperlib)')
     print_hexdump = False
+
 
 
 logging.basicConfig(level='DEBUG')
@@ -140,9 +156,9 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
         request_stream = SocketStream(self.request)
         while not self.stop.is_set():
             obj = Record.parse_stream(request_stream)
-
+            
             log.debug('Client record: %s', obj)
-
+            print("pina")
             data = obj.to_bytes()
 
             self.log_data('c>s', data)
@@ -152,6 +168,50 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                 self.stream.write(data)
             else:
                 proxies={"http": args.upstream_proxy}
+                full_data = json.loads(jsonpickle.dumps(obj))
+                #print(full_data)
+                if 'Payload' in full_data:
+                    try:
+                        print("===NEW BLOCK OF EXECUTION===")
+                        b64_payload = full_data['Payload']['py/b64']
+                        binary_decoded_payload = base64.b64decode(b64_payload)
+                        print("Original binary data: {}".format(binary_decoded_payload))
+                        nbfx=None
+                        with KaitaiStream(BytesIO(binary_decoded_payload)) as _io:
+                            nbfx=Nbfx(_io)
+                            nbfx._read()
+                        print("RECORDS LENGTH", len(nbfx.records))
+                        # second parameter is a key to the string cache dictionary 
+                        # it's supposed to be a connection identifier as caches are apparently 
+                        # maintained in a per-connection basis
+                        
+                        #Decode using python WCF
+                        #obj.decoded_payload, records_obj = parse(binary_decoded_payload, ("127.0.0.1:9000","c>s"))
+                        
+                        # Directly storing the Nbfx object, jsonpickle will serialize it 
+                        obj.nbfx=nbfx
+                        
+                        # Check internal structure before reserialization
+                        nbfx._check()
+                        
+                        # This is another ugly hack to get the expected output stream size
+                        final_size=0
+                        try:
+                            _test_io = KaitaiStream(BytesIO(bytearray(1024)))
+                            nbfx._write(_test_io)
+                        except:
+                            print("IOPOS", _test_io.pos())
+                            final_size=_test_io.pos()
+                        
+                        _out_io = KaitaiStream(BytesIO(bytearray(final_size)))
+                        nbfx._write(_out_io)
+                        obj.wcfdata=_out_io.to_byte_array() 
+                        
+                        print("===END EXECUTION===")
+                    except Exception:
+                        print(traceback.format_exc())
+                    
+
                 resp=requests.post(args.upstream_url, data=jsonpickle.dumps(obj), proxies=proxies)
                 resp_list=jsonpickle.loads(resp.text)
                 if len(resp_list)==0:
@@ -187,6 +247,7 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
 class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
     def _response(self, content):
         self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s" % (len(content.encode("utf-8")), content.encode("utf-8")))
+        print("got response: {}".format(content))
         
     def do_POST(self):
         content_len = int(self.headers.get('Content-Length'))
@@ -195,10 +256,11 @@ class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
         self.server.wcf_stream.write(obj.to_bytes())
         #recv=self.server.wcf_stream.read(1024)
         #rec=Record.parse(recv)
-        time.sleep(1.5) # uglyyyy
+        time.sleep(0.5) # uglyyyy
         ret=[]
         while not http_recv_q.empty():
-            ret.append(http_recv_q.get())
+            obj=http_recv_q.get()
+            ret.append(obj)
         self._response(jsonpickle.dumps(ret))
         
         
