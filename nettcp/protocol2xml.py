@@ -25,16 +25,18 @@ except ImportError:
 old_dictionary = dictionary.copy()
 dictionary_cache = defaultdict(dict)
 
-
+idx=1 
 def build_dictionary(fp, key):
+    global idx
     size = MultiByteInt31.parse(fp).value
     print("Dictionary table: {} bytes".format(size))
     table_data = fp.read(size)
     table = BytesIO(table_data)
 
-    idx = 1
     while table.tell() < size:
         string = Utf8String.parse(table)
+        #if idx in dictionary_cache[key]:
+        #    print(idx,dictionary_cache[key][idx], string.value)
         assert idx not in dictionary_cache[key]
         dictionary_cache[key][idx] = string.value
         idx += 2
@@ -42,9 +44,6 @@ def build_dictionary(fp, key):
     dictionary.update(old_dictionary)
     dictionary.update(dictionary_cache[key])
 
-    for idx, value in dictionary_cache[key].items():
-        print('{}: {}'.format(idx, value))
-    return dictionary_cache[key]
 
 
 def parse(data, key):
@@ -54,13 +53,7 @@ def parse(data, key):
     out = StringIO()
     print_records(records, fp=out)
     out.seek(0)
-
-    if pygments is not None:
-        print(pygments.highlight(out.read(),
-                                 pygments.lexers.get_lexer_by_name('XML'),
-                                 pygments.formatters.get_formatter_by_name('terminal')))
-    else:
-        print(out.read())
+    out.read()
 
 
 def main():
