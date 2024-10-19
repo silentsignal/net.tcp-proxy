@@ -25,7 +25,7 @@ from nettcp.protocol2xml import parse
 from wcf.xml2records import XMLParser
 from wcf.records import dump_records,print_records
 
-from nbfx import Nbfx
+from nbfx import Nbfx, nbfx_export_values, nbfx_import_values, nbfx_serialize
 
 from kaitaistruct import KaitaiStream
 
@@ -186,26 +186,14 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                         # maintained in a per-connection basis
                         
                         #Decode using python WCF
-                        #obj.decoded_payload, records_obj = parse(binary_decoded_payload, ("127.0.0.1:9000","c>s"))
+                        decoded_payload  = parse(binary_decoded_payload, ("127.0.0.1:9000","c>s"))
+                        print(decoded_payload)
                         
                         # Directly storing the Nbfx object, jsonpickle will serialize it 
-                        obj.nbfx=nbfx
+                        #obj.nbfx=nbfx
                         
-                        # Check internal structure before reserialization
-                        nbfx._check()
-                        
-                        # This is another ugly hack to get the expected output stream size
-                        final_size=0
-                        try:
-                            _test_io = KaitaiStream(BytesIO(bytearray(1024)))
-                            nbfx._write(_test_io)
-                        except:
-                            print("IOPOS", _test_io.pos())
-                            final_size=_test_io.pos()
-                        
-                        _out_io = KaitaiStream(BytesIO(bytearray(final_size)))
-                        nbfx._write(_out_io)
-                        obj.wcfdata=_out_io.to_byte_array() 
+                        # Attach editable data to the object
+                        obj.wcf_export=nbfx_export_values(nbfx)
                         
                         print("===END EXECUTION===")
                     except Exception:
@@ -213,7 +201,11 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                     
 
                 resp=requests.post(args.upstream_url, data=jsonpickle.dumps(obj), proxies=proxies)
-                resp_list=jsonpickle.loads(resp.text)
+                try:
+                    resp_list=jsonpickle.loads(resp.text)
+                except:
+                    print(repr(resp.text))
+                    raise
                 if len(resp_list)==0:
                     print("No response, try further client messages")
                 for resp_obj in resp_list:
@@ -252,7 +244,14 @@ class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         content_len = int(self.headers.get('Content-Length'))
         post_body = self.rfile.read(content_len)
+        
         obj=jsonpickle.loads(post_body)
+        if hasattr(obj, "wcf_export"):
+            with KaitaiStream(BytesIO(obj.Payload)) as _io:
+                nbfx=Nbfx(_io)
+                nbfx._read()
+                nbfx_edited=nbfx_import_values(nbfx, obj.wcf_export)
+                obj.Payload=nbfx_serialize(nbfx_edited)
         self.server.wcf_stream.write(obj.to_bytes())
         #recv=self.server.wcf_stream.read(1024)
         #rec=Record.parse(recv)
