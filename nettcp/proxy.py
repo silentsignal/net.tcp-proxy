@@ -111,16 +111,20 @@ class HttpRecvThread(threading.Thread):
     def __init__(self, s):
         super(HttpRecvThread, self).__init__()
         self.stream=s
+        self.stop = threading.Event()
 
     def run(self):
         log.debug('HTTP Handling data coming from the server')
         global http_recv_q
-        while True:
+        while not self.stop.is_set():
             obj = Record.parse_stream(self.stream)
             log.debug('Got from server: %r', obj)
             http_recv_q.put(obj)
             data = obj.to_bytes()
             #self.handler.log_data('s>c', data)
+
+    def terminate(self):
+        self.stop.set()
 
 class NETTCPProxy(SocketServer.BaseRequestHandler):
     negotiate = True
@@ -149,16 +153,17 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
         try:
             self.mainloop(s, t)
         finally:
-            t.terminate()
+            if args.upstream_url is None:
+                t.terminate()
 
     def mainloop(self, s, t):
         global args
+        
         request_stream = SocketStream(self.request)
         while not self.stop.is_set():
             obj = Record.parse_stream(request_stream)
             
             log.debug('Client record: %s', obj)
-            print("pina")
             data = obj.to_bytes()
 
             self.log_data('c>s', data)
@@ -169,7 +174,6 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
             else:
                 proxies={"http": args.upstream_proxy}
                 full_data = json.loads(jsonpickle.dumps(obj))
-                #print(full_data)
                 if 'Payload' in full_data:
                     try:
                         print("===NEW BLOCK OF EXECUTION===")
@@ -187,7 +191,7 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                         
                         #Decode using python WCF
                         decoded_payload  = parse(binary_decoded_payload, ("127.0.0.1:9000","c>s"))
-                        print(decoded_payload)
+                        # print(decoded_payload)
                         
                         # Directly storing the Nbfx object, jsonpickle will serialize it 
                         #obj.nbfx=nbfx
@@ -196,22 +200,24 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                         obj.wcf_export=nbfx_export_values(nbfx)
                         
                         print("===END EXECUTION===")
-                    except Exception:
-                        print(traceback.format_exc())
+                    except ConnectionResetError:
+                        print("Connection reset")
+                        self.stop.set()
+                        return
                     
 
                 resp=requests.post(args.upstream_url, data=jsonpickle.dumps(obj), proxies=proxies)
-                try:
-                    resp_list=jsonpickle.loads(resp.text)
-                except:
-                    print(repr(resp.text))
-                    raise
+
+                resp_list=jsonpickle.loads(resp.text)
+
                 if len(resp_list)==0:
                     print("No response, try further client messages")
                 for resp_obj in resp_list:
                     print("Sending object")
                     #resp_obj=jsonpickle.loads(resp.text)
                     self.request.sendall(resp_obj.to_bytes())
+                    if resp_obj.code == EndRecord.code:
+                        self.stop.set()
                 continue
                 #self.stream.write(data)
             if obj.code == KnownEncodingRecord.code:
@@ -246,12 +252,17 @@ class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
         post_body = self.rfile.read(content_len)
         
         obj=jsonpickle.loads(post_body)
+        
         if hasattr(obj, "wcf_export"):
+            print("Size:",obj.Size," len(Payload):", len(obj.Payload))
             with KaitaiStream(BytesIO(obj.Payload)) as _io:
                 nbfx=Nbfx(_io)
                 nbfx._read()
                 nbfx_edited=nbfx_import_values(nbfx, obj.wcf_export)
-                obj.Payload=nbfx_serialize(nbfx_edited)
+                nbfx_edited_bytes=nbfx_serialize(nbfx_edited)
+                obj.Size=len(nbfx_edited_bytes)
+                obj.Payload=nbfx_edited_bytes
+        
         self.server.wcf_stream.write(obj.to_bytes())
         #recv=self.server.wcf_stream.read(1024)
         #rec=Record.parse(recv)
@@ -303,7 +314,7 @@ def main():
         server.serve_forever()
     else:
         #Handler = MyHttpRequestHandler
-        with socketserver.TCPServer(("", args.port), MyHttpRequestHandler) as httpd:
+        with socketserver.ThreadingTCPServer(("", args.port), MyHttpRequestHandler) as httpd:
             print("Http Server Serving at port", args.port)
             s = socket.create_connection((TARGET_HOST, TARGET_PORT))
             wcf_stream = SocketStream(s)
