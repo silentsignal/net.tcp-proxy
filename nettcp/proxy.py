@@ -224,7 +224,11 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                     args.upstream_url, data=jsonpickle.dumps(obj), proxies=proxies
                 )
 
-                resp_list = jsonpickle.loads(resp.text)
+                try:
+                    resp_list = jsonpickle.loads(resp.text)
+                except:
+                    print(resp.text)
+                    raise
 
                 if len(resp_list) == 0:
                     print("No response, try further client messages")
@@ -294,24 +298,29 @@ class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
                 upgr = UpgradeRequestRecord(
                     UpgradeProtocolLength=21, UpgradeProtocol="application/negotiate"
                 ).to_bytes()
-                self.server.wcf_stream.write(upgr)
-                resp = Record.parse_stream(SocketStream(s))
+                self.server.raw_stream.sendall(upgr)
+                resp = Record.parse_stream(self.server.wcf_stream)
+                #time.sleep(0.5)  # uglyyyy
+                #resp = http_recv_q.get()
                 assert resp.code == UpgradeResponseRecord.code, resp
-                self.server.wcf_stream = GSSAPIStream(self.stream, self.server_name)
+                print("assert success")
+                self.server.wcf_stream = GSSAPIStream(self.server.wcf_stream, args.negotiate)
                 self.server.wcf_stream.negotiate()
-                # self.negotiated = True
-            # self.http_recv_thread = HttpRecvThread(self.server.wcf_stream)
-            # self.http_recv_thread.start()
+            self.server.negotiated = True
+            self.server.http_recv_thread = HttpRecvThread(self.server.wcf_stream)
+            self.server.http_recv_thread.start()
         # recv=self.server.wcf_stream.read(1024)
         # rec=Record.parse(recv)
-
-        time.sleep(0.5)  # uglyyyy
-        ret = []
-        while not http_recv_q.empty():
-            obj = http_recv_q.get()
-            ret.append(obj)
-        print("sending response")
-        self._response(jsonpickle.dumps(ret))
+        if self.server.negotiated:
+            time.sleep(0.5)  # uglyyyy
+            ret = []
+            while not http_recv_q.empty():
+                obj = http_recv_q.get()
+                ret.append(obj)
+            print("sending response")
+            self._response(jsonpickle.dumps(ret))
+        else:
+            self._response(jsonpickle.dumps([]))
 
 
 def main():
@@ -363,9 +372,11 @@ def main():
             print("Http Server Serving at port", args.port)
             s = socket.create_connection((TARGET_HOST, TARGET_PORT))
             wcf_stream = SocketStream(s)
+            httpd.raw_stream = s
             httpd.wcf_stream = wcf_stream
-            http_recv_thread = HttpRecvThread(wcf_stream)
-            http_recv_thread.start()
+            httpd.http_recv_thread = None # HttpRecvThread(wcf_stream)
+            httpd.negotiated = False
+            #http_recv_thread.start()
             httpd.serve_forever()
 
 
