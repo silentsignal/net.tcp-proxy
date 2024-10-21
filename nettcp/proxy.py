@@ -73,8 +73,9 @@ trace_file = None
 
 args = None
 
-http_recv_q = queue.Queue()
+#http_recv_q = queue.Queue()
 
+http2bin_conn_pool={}
 
 def print_data(msg, data):
     if log.isEnabledFor(logging.DEBUG):
@@ -120,19 +121,22 @@ class RecvThread(threading.Thread):
 
 # We have async responses, so we need a separate thread to handle responses
 class HttpRecvThread(threading.Thread):
-    def __init__(self, s):
+    def __init__(self, s, q):
         super(HttpRecvThread, self).__init__()
         self.stream = s
         self.stop = threading.Event()
+        self.q = q
+        print("HTTP receiver start")
 
     def run(self):
         log.debug("HTTP Handling data coming from the server")
-        global http_recv_q
         while not self.stop.is_set():
+            print("Serving")
             obj = Record.parse_stream(self.stream)
-            log.debug("Got from server: %r", obj)
-            http_recv_q.put(obj)
-            data = obj.to_bytes()
+            print("Got from server: %r", obj)
+            self.q.put(obj)
+            print("QSIZE",self.q.qsize())
+            #data = obj.to_bytes()
             # self.handler.log_data('s>c', data)
 
     def terminate(self):
@@ -171,12 +175,13 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
 
     def mainloop(self, s, t):
         global args
-
+        self.dummy=0
         request_stream = SocketStream(self.request)
         while not self.stop.is_set():
             obj = Record.parse_stream(request_stream)
-
-            log.debug("Client record: %s", obj)
+            self.dummy+=1
+            print("Client record from %s: %s\nMy socket is %s" % (obj, repr(self.client_address), 
+                  repr(self.dummy)))
             data = obj.to_bytes()
 
             self.log_data("c>s", data)
@@ -219,7 +224,7 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                         print("Connection reset")
                         self.stop.set()
                         return
-
+                obj.client_address = self.client_address
                 resp = requests.post(
                     args.upstream_url, data=jsonpickle.dumps(obj), proxies=proxies
                 )
@@ -274,12 +279,26 @@ class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
         print("got response: {}".format(content))
 
     def do_POST(self):
-        global args
+        global args, http_recv_threads
+        print("My HTTP Dummy is: %s " % (self.server.dummy))
         content_len = int(self.headers.get("Content-Length"))
         post_body = self.rfile.read(content_len)
 
         obj = jsonpickle.loads(post_body)
-
+        raw_socket = None
+        wcf_stream = None
+        if obj.client_address not in http2bin_conn_pool:
+            print("New connection from", obj.client_address, "to", (TARGET_HOST, TARGET_PORT))
+            raw_socket = socket.create_connection((TARGET_HOST, TARGET_PORT))
+            wcf_stream = SocketStream(raw_socket)
+            wcf_stream.negotiated=False
+            http2bin_conn_pool[obj.client_address] = {"wcf_stream":wcf_stream}
+        else:
+            wcf_stream = http2bin_conn_pool[obj.client_address]["wcf_stream"]
+            raw_socket = wcf_stream._socket
+            
+            
+        pool = http2bin_conn_pool[obj.client_address]
         if hasattr(obj, "wcf_export"):
             print("Size:", obj.Size, " len(Payload):", len(obj.Payload))
             with KaitaiStream(BytesIO(obj.Payload)) as _io:
@@ -290,32 +309,40 @@ class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
                 obj.Size = len(nbfx_edited_bytes)
                 obj.Payload = nbfx_edited_bytes
 
-        self.server.wcf_stream.write(obj.to_bytes())
+        wcf_stream.write(obj.to_bytes())
 
         if obj.code == KnownEncodingRecord.code:
-            print("Negotiating Kerberos")
-            if args.negotiate:
+            if not wcf_stream.negotiated and args.negotiate:
+                print("Negotiating Kerberos")
                 upgr = UpgradeRequestRecord(
                     UpgradeProtocolLength=21, UpgradeProtocol="application/negotiate"
                 ).to_bytes()
-                self.server.raw_stream.sendall(upgr)
-                resp = Record.parse_stream(self.server.wcf_stream)
+                raw_socket.sendall(upgr)
+                resp = Record.parse_stream(wcf_stream)
                 #time.sleep(0.5)  # uglyyyy
                 #resp = http_recv_q.get()
                 assert resp.code == UpgradeResponseRecord.code, resp
                 print("assert success")
-                self.server.wcf_stream = GSSAPIStream(self.server.wcf_stream, args.negotiate)
-                self.server.wcf_stream.negotiate()
-            self.server.negotiated = True
-            self.server.http_recv_thread = HttpRecvThread(self.server.wcf_stream)
-            self.server.http_recv_thread.start()
+                wcf_stream = GSSAPIStream(wcf_stream, args.negotiate)
+                wcf_stream.negotiate()
+            print("Negotiated!")
+            wcf_stream.negotiated = True
+            
+            pool["q"]=queue.Queue()
+            t=HttpRecvThread(wcf_stream, pool["q"])
+            t.start()
+            pool["recv_thread"] = t
+                
         # recv=self.server.wcf_stream.read(1024)
         # rec=Record.parse(recv)
-        if self.server.negotiated:
+        print("Negotiated?",wcf_stream.negotiated)
+        if wcf_stream.negotiated:
+            print("sleeping before we ask for data...")
             time.sleep(0.5)  # uglyyyy
+            print(pool["recv_thread"].q.empty(),pool["q"].empty())
             ret = []
-            while not http_recv_q.empty():
-                obj = http_recv_q.get()
+            while not pool["recv_thread"].q.empty():
+                obj = pool["recv_thread"].q.get()
                 ret.append(obj)
             print("sending response")
             self._response(jsonpickle.dumps(ret))
@@ -374,6 +401,7 @@ def main():
             wcf_stream = SocketStream(s)
             httpd.raw_stream = s
             httpd.wcf_stream = wcf_stream
+            httpd.dummy=0
             httpd.http_recv_thread = None # HttpRecvThread(wcf_stream)
             httpd.negotiated = False
             #http_recv_thread.start()
