@@ -74,7 +74,8 @@ trace_file = None
 args = None
 
 # This dict will hold connection data associated to client addresses (e.g. ("127.0.0.1",51234))
-http2bin_conn_pool={}
+http2bin_conn_pool = {}
+
 
 def print_data(msg, data):
     if log.isEnabledFor(logging.DEBUG):
@@ -83,6 +84,7 @@ def print_data(msg, data):
             print_hexdump(data, colored=True, file=sys.stderr)
         else:
             print(data, file=sys.stderr)
+
 
 # Receiver thread for old TCP mode
 class RecvThread(threading.Thread):
@@ -117,6 +119,7 @@ class RecvThread(threading.Thread):
     def terminate(self):
         self.stop.set()
 
+
 # Receiver thread for new HTTP connections
 # We have async responses, so we need a separate thread to handle responses
 class HttpRecvThread(threading.Thread):
@@ -130,15 +133,20 @@ class HttpRecvThread(threading.Thread):
     def run(self):
         log.debug("HTTP Handling data coming from the server")
         while not self.stop.is_set():
-            obj = Record.parse_stream(self.stream)
+            try:
+                obj = Record.parse_stream(self.stream)
+            except ConnectionAbortedError:
+                print("HTTP receiver connection aborted, thread exit")
+                break
             log.debug("Got from server: %r", obj)
             # Put data to connection-specific queue, the HTTP service will consume it
             self.q.put(obj)
-            #data = obj.to_bytes()
+            # data = obj.to_bytes()
             # self.handler.log_data('s>c', data)
 
     def terminate(self):
         self.stop.set()
+
 
 # TCP connection handler for raw NMF streams
 # In HTTP mode this is the NMF Client<->HTTP part
@@ -160,7 +168,7 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
         s = None
         t = None
         self.stop = threading.Event()
-        self.negotiated = False # Is initial NMF protocol negotiation done?
+        self.negotiated = False  # Is initial NMF protocol negotiation done?
 
         # Are we in HTTP proxy mode?
         if args.upstream_url is None:
@@ -168,7 +176,7 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
             self.stream = SocketStream(s)
             t = RecvThread(self)
             # t.daemon = True
-        
+
         try:
             self.mainloop(s, t)
         finally:
@@ -192,17 +200,19 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                 self.stream.write(data)
             else:
                 proxies = {"http": args.upstream_proxy}
-               
+
                 # This is wrong and should be fixed
-                #full_data = json.loads(jsonpickle.dumps(obj))
+                # full_data = json.loads(jsonpickle.dumps(obj))
                 if hasattr(obj, "Payload"):
                     try:
                         print("===NEW BLOCK OF EXECUTION===")
-                        #b64_payload = full_data["Payload"]["py/b64"]
-                        binary_decoded_payload = obj.Payload # base64.b64decode(b64_payload)
+                        # b64_payload = full_data["Payload"]["py/b64"]
+                        binary_decoded_payload = (
+                            obj.Payload
+                        )  # base64.b64decode(b64_payload)
                         print("Original binary data: {}".format(binary_decoded_payload))
                         nbfx = None
-                        
+
                         # Beacuse of read-write mode, we have to explicitly call _read()
                         with KaitaiStream(BytesIO(binary_decoded_payload)) as _io:
                             nbfx = Nbfx(_io)
@@ -210,13 +220,16 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                         # TODO error handling
 
                         # print("RECORDS LENGTH", len(nbfx.records))
-                        
+
                         # Decode using python WCF
                         # second parameter is a key to the string cache dictionary
                         # it's supposed to be a connection identifier as caches are apparently
                         # maintained in a per-connection basis
+                        # TODO I have no idea why this needs a static value
+                        # If we use self.client_address the second connection results in KeyError in the dictionary
                         decoded_payload = parse(
-                            binary_decoded_payload, (self.client_address, "c>s")
+                            binary_decoded_payload,
+                            ("127.0.0.1:9000", "c>s"),  # (self.client_address, "c>s")
                         )
 
                         # Attach editable data to the object
@@ -235,7 +248,7 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                     args.upstream_url, data=jsonpickle.dumps(obj), proxies=proxies
                 )
 
-                # Deserialize JSON HTTP response 
+                # Deserialize JSON HTTP response
                 # We may receive multiple NMF frames
                 try:
                     resp_list = jsonpickle.loads(resp.text)
@@ -245,7 +258,7 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
 
                 if len(resp_list) == 0:
                     print("No response, try further client messages")
-                
+
                 # Send response NMF objects back in the raw NMF stream
                 for resp_obj in resp_list:
                     print("Sending object")
@@ -290,6 +303,7 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                     log.info("Client requested end")
                     self.stop.wait()
 
+
 # This is the HTTP Proxy <-> WCF Service part
 # A minimalist HTTP server to translate for the target WCF service
 class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -312,21 +326,27 @@ class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
         post_body = self.rfile.read(content_len)
 
         obj = jsonpickle.loads(post_body)
-        raw_socket = None # Python TCP socket
-        wcf_stream = None # net.tcp-proxy SocketStream
+        raw_socket = None  # Python TCP socket
+        wcf_stream = None  # net.tcp-proxy SocketStream
 
         # Look up / initialize global connection pool for multiplexing
         if obj.client_address not in http2bin_conn_pool:
-            print("New connection from", obj.client_address, "to", (TARGET_HOST, TARGET_PORT))
+            print(
+                "New connection from",
+                obj.client_address,
+                "to",
+                (TARGET_HOST, TARGET_PORT),
+            )
             raw_socket = socket.create_connection((TARGET_HOST, TARGET_PORT))
-            wcf_stream = SocketStream(raw_socket) # SocketStream will reference the underlying TCP socket
-            wcf_stream.negotiated=False
-            http2bin_conn_pool[obj.client_address] = {"wcf_stream":wcf_stream}
+            wcf_stream = SocketStream(
+                raw_socket
+            )  # SocketStream will reference the underlying TCP socket
+            wcf_stream.negotiated = False
+            http2bin_conn_pool[obj.client_address] = {"wcf_stream": wcf_stream}
         else:
             wcf_stream = http2bin_conn_pool[obj.client_address]["wcf_stream"]
             raw_socket = wcf_stream._socket
-            
-            
+
         pool = http2bin_conn_pool[obj.client_address]
         if hasattr(obj, "wcf_export"):
             print("Size:", obj.Size, " len(Payload):", len(obj.Payload))
@@ -349,31 +369,31 @@ class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
                 ).to_bytes()
                 raw_socket.sendall(upgr)
                 resp = Record.parse_stream(wcf_stream)
-                #time.sleep(0.5)  # uglyyyy
-                #resp = http_recv_q.get()
+                # time.sleep(0.5)  # uglyyyy
+                # resp = http_recv_q.get()
                 assert resp.code == UpgradeResponseRecord.code, resp
-                #print("assert success")
+                # print("assert success")
                 wcf_stream = GSSAPIStream(wcf_stream, args.negotiate)
                 wcf_stream.negotiate()
             print("Negotiated!")
             wcf_stream.negotiated = True
-            
-            pool["q"]=queue.Queue() # Message queue dedicated for this connection
+
+            pool["q"] = queue.Queue()  # Message queue dedicated for this connection
             # Start receiver thread, pass msg queue
-            t=HttpRecvThread(wcf_stream, pool["q"])
-            t.start() 
+            t = HttpRecvThread(wcf_stream, pool["q"])
+            t.start()
             pool["recv_thread"] = t
-        
+
         # recv=self.server.wcf_stream.read(1024)
         # rec=Record.parse(recv)
-        print("Negotiated?",wcf_stream.negotiated)
-        exit_now=False
+        print("Negotiated?", wcf_stream.negotiated)
+        exit_now = False
         if wcf_stream.negotiated:
             print("sleeping before we ask for data...")
-            timer=0.1
+            timer = 0.1
             while pool["recv_thread"].q.empty():
                 time.sleep(timer)  # uglyyyy
-                timer*=2
+                timer *= 2
                 if timer > 1.0:
                     break
             # print(pool["recv_thread"].q.empty(),pool["q"].empty())
@@ -381,18 +401,24 @@ class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
             while not pool["recv_thread"].q.empty():
                 recv_obj = pool["recv_thread"].q.get()
                 ret.append(recv_obj)
+                if hasattr(recv_obj, "Payload"):
+                    with KaitaiStream(BytesIO(recv_obj.Payload)) as _io:
+                        nbfx = Nbfx(_io)
+                        nbfx._read()
+                        recv_obj.nbfx = nbfx_export_values(nbfx)
                 if recv_obj.code == EndRecord.code:
                     exit_now = True
             print("sending response")
             self._response(jsonpickle.dumps(ret))
         else:
-            #time.sleep(0.2)
+            # time.sleep(0.2)
             self._response(jsonpickle.dumps([]))
-        
+
         # Server closed the connection, exit here
         if exit_now:
-          pool["recv_thread"].terminate()
-          del http2bin_conn_pool[obj.client_address]
+            pool["recv_thread"].terminate()
+            pool["wcf_stream"]._socket.close()
+            del http2bin_conn_pool[obj.client_address]
 
 
 def main():
@@ -437,19 +463,10 @@ def main():
         server = SocketServer.ThreadingTCPServer((args.bind, args.port), NETTCPProxy)
         server.serve_forever()
     else:
-        # Handler = MyHttpRequestHandler
         with socketserver.ThreadingTCPServer(
             ("", args.port), MyHttpRequestHandler
         ) as httpd:
             print("Http Server Serving at port", args.port)
-            #s = socket.create_connection((TARGET_HOST, TARGET_PORT))
-            #wcf_stream = SocketStream(s)
-            #httpd.raw_stream = s
-            #httpd.wcf_stream = wcf_stream
-            #httpd.dummy=0
-            #httpd.http_recv_thread = None # HttpRecvThread(wcf_stream)
-            #httpd.negotiated = False
-            #http_recv_thread.start()
             httpd.serve_forever()
 
 
