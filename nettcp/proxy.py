@@ -369,10 +369,7 @@ class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
                 ).to_bytes()
                 raw_socket.sendall(upgr)
                 resp = Record.parse_stream(wcf_stream)
-                # time.sleep(0.5)  # uglyyyy
-                # resp = http_recv_q.get()
                 assert resp.code == UpgradeResponseRecord.code, resp
-                # print("assert success")
                 wcf_stream = GSSAPIStream(wcf_stream, args.negotiate)
                 wcf_stream.negotiate()
             print("Negotiated!")
@@ -384,34 +381,41 @@ class MyHttpRequestHandler(http.server.BaseHTTPRequestHandler):
             t.start()
             pool["recv_thread"] = t
 
-        # recv=self.server.wcf_stream.read(1024)
-        # rec=Record.parse(recv)
-        print("Negotiated?", wcf_stream.negotiated)
-        exit_now = False
+        # print("Negotiated?", wcf_stream.negotiated)
+        exit_now = False  # Variable to track if any of the received responses was an EndOfStream
+
+        # After negotiation is down we can expect some data in the receive queue
         if wcf_stream.negotiated:
             print("sleeping before we ask for data...")
             timer = 0.1
+            # It may take some time to get a response
+            # Since the client side is usually synchronized, we better wait a bit
             while pool["recv_thread"].q.empty():
                 time.sleep(timer)  # uglyyyy
                 timer *= 2
                 if timer > 1.0:
                     break
-            # print(pool["recv_thread"].q.empty(),pool["q"].empty())
+
+            # Collect responses recevied by the HTTPRecvThread
             ret = []
             while not pool["recv_thread"].q.empty():
                 recv_obj = pool["recv_thread"].q.get()
                 ret.append(recv_obj)
+                # If there is NBFX payload, we include exported data in the HTTP response
+                # The response data is read-only for now!
+                # Note: if you want to include the full Nbfx object you shouldn't close _io
+                #       before passing it to jsonpickle!
                 if hasattr(recv_obj, "Payload"):
                     with KaitaiStream(BytesIO(recv_obj.Payload)) as _io:
                         nbfx = Nbfx(_io)
                         nbfx._read()
                         recv_obj.nbfx = nbfx_export_values(nbfx)
+                # Should we close this connection?
                 if recv_obj.code == EndRecord.code:
                     exit_now = True
-            print("sending response")
             self._response(jsonpickle.dumps(ret))
         else:
-            # time.sleep(0.2)
+            # If the stream is not negotiated yet, we just send an empty response
             self._response(jsonpickle.dumps([]))
 
         # Server closed the connection, exit here
