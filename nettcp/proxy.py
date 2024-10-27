@@ -21,7 +21,7 @@ import traceback
 import subprocess
 from io import BytesIO
 
-from nettcp.protocol2xml import parse
+#from nettcp.protocol2xml import parse
 from wcf.xml2records import XMLParser
 from wcf.records import dump_records, print_records
 
@@ -225,12 +225,12 @@ class NETTCPProxy(SocketServer.BaseRequestHandler):
                         # second parameter is a key to the string cache dictionary
                         # it's supposed to be a connection identifier as caches are apparently
                         # maintained in a per-connection basis
-                        # TODO I have no idea why this needs a static value
+                        # I have no idea why this needs a static value
                         # If we use self.client_address the second connection results in KeyError in the dictionary
-                        decoded_payload = parse(
-                            binary_decoded_payload,
-                            ("127.0.0.1:9000", "c>s"),  # (self.client_address, "c>s")
-                        )
+                        # decoded_payload = parse(
+                        #    binary_decoded_payload,
+                        #    ("127.0.0.1:9000", "c>s"),  # (self.client_address, "c>s")
+                        # )
 
                         # Attach editable data to the object
                         obj.wcf_export = nbfx_export_values(nbfx)
